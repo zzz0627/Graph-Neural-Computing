@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.nn import MultiheadAttention
 
 from models.modules import TimeEncoder
+from features.feature_fusion import FeatureFusion
 from utils.utils import NeighborSampler
 
 
@@ -12,7 +13,9 @@ class DyGFormer(nn.Module):
 
     def __init__(self, node_raw_features: np.ndarray, edge_raw_features: np.ndarray, neighbor_sampler: NeighborSampler,
                  time_feat_dim: int, channel_embedding_dim: int, patch_size: int = 1, num_layers: int = 2, num_heads: int = 2,
-                 dropout: float = 0.1, max_input_sequence_length: int = 512, device: str = 'cpu'):
+                 dropout: float = 0.1, max_input_sequence_length: int = 512, device: str = 'cpu',
+                 extra_edge_channel_features: dict = None,
+                 node_sidecar_features: dict = None, fusion_mode: str = 'concat'):
         """
         DyGFormer model.
         :param node_raw_features: ndarray, shape (num_nodes + 1, node_feat_dim)
@@ -26,6 +29,13 @@ class DyGFormer(nn.Module):
         :param dropout: float, dropout rate
         :param max_input_sequence_length: int, maximal length of the input sequence for each node
         :param device: str, device
+        :param extra_edge_channel_features: dict {name: ndarray} of additional per-edge
+               feature arrays (e.g. style, topic).  Each array has shape
+               (num_edges + 1, feat_dim).  None or {} means no extra channels.
+        :param node_sidecar_features: dict {name: ndarray} of per-node feature arrays
+               (e.g. personality).  Each has shape (num_nodes + 1, feat_dim).
+               Fused after output_layer via FeatureFusion.  None or {} = no sidecar.
+        :param fusion_mode: str, fusion method for sidecar features ('concat', etc.)
         """
         super(DyGFormer, self).__init__()
 
@@ -44,6 +54,16 @@ class DyGFormer(nn.Module):
         self.max_input_sequence_length = max_input_sequence_length
         self.device = device
 
+        # Extra edge channels (e.g. style, topic) -- stored as plain tensors
+        # like self.edge_raw_features, not in state_dict (reloaded from data).
+        self.extra_edge_channel_names = []
+        self._extra_edge_features = {}
+        if extra_edge_channel_features:
+            for name, feat_np in extra_edge_channel_features.items():
+                self._extra_edge_features[name] = torch.from_numpy(
+                    feat_np.astype(np.float32)).to(device)
+                self.extra_edge_channel_names.append(name)
+
         self.time_encoder = TimeEncoder(time_dim=time_feat_dim)
 
         self.neighbor_co_occurrence_feat_dim = self.channel_embedding_dim
@@ -55,8 +75,13 @@ class DyGFormer(nn.Module):
             'time': nn.Linear(in_features=self.patch_size * self.time_feat_dim, out_features=self.channel_embedding_dim, bias=True),
             'neighbor_co_occurrence': nn.Linear(in_features=self.patch_size * self.neighbor_co_occurrence_feat_dim, out_features=self.channel_embedding_dim, bias=True)
         })
+        for name in self.extra_edge_channel_names:
+            feat_dim = self._extra_edge_features[name].shape[1]
+            self.projection_layer[name] = nn.Linear(
+                in_features=self.patch_size * feat_dim,
+                out_features=self.channel_embedding_dim, bias=True)
 
-        self.num_channels = 4
+        self.num_channels = 4 + len(self.extra_edge_channel_names)
 
         self.transformers = nn.ModuleList([
             TransformerEncoder(attention_dim=self.num_channels * self.channel_embedding_dim, num_heads=self.num_heads, dropout=self.dropout)
@@ -64,6 +89,23 @@ class DyGFormer(nn.Module):
         ])
 
         self.output_layer = nn.Linear(in_features=self.num_channels * self.channel_embedding_dim, out_features=self.node_feat_dim, bias=True)
+
+        # Node-level sidecar features (e.g. personality) -- fused after output_layer
+        self._node_sidecar_names = sorted((node_sidecar_features or {}).keys())
+        self._node_sidecar_features = {}
+        total_sidecar_dim = 0
+        for name in self._node_sidecar_names:
+            feat_np = node_sidecar_features[name]
+            self._node_sidecar_features[name] = torch.from_numpy(
+                feat_np.astype(np.float32)).to(device)
+            total_sidecar_dim += feat_np.shape[1]
+
+        self.sidecar_fusion = FeatureFusion(
+            backbone_dim=self.node_feat_dim,
+            sidecar_dim=total_sidecar_dim,
+            fusion_mode=fusion_mode,
+            dropout=dropout,
+        ) if total_sidecar_dim > 0 else None
 
     def compute_src_dst_node_temporal_embeddings(self, src_node_ids: np.ndarray, dst_node_ids: np.ndarray, node_interact_times: np.ndarray):
         """
@@ -73,31 +115,14 @@ class DyGFormer(nn.Module):
         :param node_interact_times: ndarray, shape (batch_size, )
         :return:
         """
-        # get the first-hop neighbors of source and destination nodes
-        # three lists to store source nodes' first-hop neighbor ids, edge ids and interaction timestamp information, with batch_size as the list length
-        src_nodes_neighbor_ids_list, src_nodes_edge_ids_list, src_nodes_neighbor_times_list = \
-            self.neighbor_sampler.get_all_first_hop_neighbors(node_ids=src_node_ids, node_interact_times=node_interact_times)
-
-        # three lists to store destination nodes' first-hop neighbor ids, edge ids and interaction timestamp information, with batch_size as the list length
-        dst_nodes_neighbor_ids_list, dst_nodes_edge_ids_list, dst_nodes_neighbor_times_list = \
-            self.neighbor_sampler.get_all_first_hop_neighbors(node_ids=dst_node_ids, node_interact_times=node_interact_times)
-
-        # pad the sequences of first-hop neighbors for source and destination nodes
-        # src_padded_nodes_neighbor_ids, ndarray, shape (batch_size, src_max_seq_length)
-        # src_padded_nodes_edge_ids, ndarray, shape (batch_size, src_max_seq_length)
-        # src_padded_nodes_neighbor_times, ndarray, shape (batch_size, src_max_seq_length)
+        # get padded first-hop neighbor sequences (combined retrieval + padding in single pass)
+        # three ndarrays, shape (batch_size, src_max_seq_length)
         src_padded_nodes_neighbor_ids, src_padded_nodes_edge_ids, src_padded_nodes_neighbor_times = \
-            self.pad_sequences(node_ids=src_node_ids, node_interact_times=node_interact_times, nodes_neighbor_ids_list=src_nodes_neighbor_ids_list,
-                               nodes_edge_ids_list=src_nodes_edge_ids_list, nodes_neighbor_times_list=src_nodes_neighbor_times_list,
-                               patch_size=self.patch_size, max_input_sequence_length=self.max_input_sequence_length)
+            self.get_padded_neighbors(node_ids=src_node_ids, node_interact_times=node_interact_times)
 
-        # dst_padded_nodes_neighbor_ids, ndarray, shape (batch_size, dst_max_seq_length)
-        # dst_padded_nodes_edge_ids, ndarray, shape (batch_size, dst_max_seq_length)
-        # dst_padded_nodes_neighbor_times, ndarray, shape (batch_size, dst_max_seq_length)
+        # three ndarrays, shape (batch_size, dst_max_seq_length)
         dst_padded_nodes_neighbor_ids, dst_padded_nodes_edge_ids, dst_padded_nodes_neighbor_times = \
-            self.pad_sequences(node_ids=dst_node_ids, node_interact_times=node_interact_times, nodes_neighbor_ids_list=dst_nodes_neighbor_ids_list,
-                               nodes_edge_ids_list=dst_nodes_edge_ids_list, nodes_neighbor_times_list=dst_nodes_neighbor_times_list,
-                               patch_size=self.patch_size, max_input_sequence_length=self.max_input_sequence_length)
+            self.get_padded_neighbors(node_ids=dst_node_ids, node_interact_times=node_interact_times)
 
         # src_padded_nodes_neighbor_co_occurrence_features, Tensor, shape (batch_size, src_max_seq_length, neighbor_co_occurrence_feat_dim)
         # dst_padded_nodes_neighbor_co_occurrence_features, Tensor, shape (batch_size, dst_max_seq_length, neighbor_co_occurrence_feat_dim)
@@ -109,39 +134,33 @@ class DyGFormer(nn.Module):
         # src_padded_nodes_neighbor_node_raw_features, Tensor, shape (batch_size, src_max_seq_length, node_feat_dim)
         # src_padded_nodes_edge_raw_features, Tensor, shape (batch_size, src_max_seq_length, edge_feat_dim)
         # src_padded_nodes_neighbor_time_features, Tensor, shape (batch_size, src_max_seq_length, time_feat_dim)
-        src_padded_nodes_neighbor_node_raw_features, src_padded_nodes_edge_raw_features, src_padded_nodes_neighbor_time_features = \
+        src_padded_nodes_neighbor_node_raw_features, src_padded_nodes_edge_raw_features, src_padded_nodes_neighbor_time_features, src_extra_edge_feats = \
             self.get_features(node_interact_times=node_interact_times, padded_nodes_neighbor_ids=src_padded_nodes_neighbor_ids,
                               padded_nodes_edge_ids=src_padded_nodes_edge_ids, padded_nodes_neighbor_times=src_padded_nodes_neighbor_times, time_encoder=self.time_encoder)
 
         # dst_padded_nodes_neighbor_node_raw_features, Tensor, shape (batch_size, dst_max_seq_length, node_feat_dim)
         # dst_padded_nodes_edge_raw_features, Tensor, shape (batch_size, dst_max_seq_length, edge_feat_dim)
         # dst_padded_nodes_neighbor_time_features, Tensor, shape (batch_size, dst_max_seq_length, time_feat_dim)
-        dst_padded_nodes_neighbor_node_raw_features, dst_padded_nodes_edge_raw_features, dst_padded_nodes_neighbor_time_features = \
+        dst_padded_nodes_neighbor_node_raw_features, dst_padded_nodes_edge_raw_features, dst_padded_nodes_neighbor_time_features, dst_extra_edge_feats = \
             self.get_features(node_interact_times=node_interact_times, padded_nodes_neighbor_ids=dst_padded_nodes_neighbor_ids,
                               padded_nodes_edge_ids=dst_padded_nodes_edge_ids, padded_nodes_neighbor_times=dst_padded_nodes_neighbor_times, time_encoder=self.time_encoder)
 
         # get the patches for source and destination nodes
-        # src_patches_nodes_neighbor_node_raw_features, Tensor, shape (batch_size, src_num_patches, patch_size * node_feat_dim)
-        # src_patches_nodes_edge_raw_features, Tensor, shape (batch_size, src_num_patches, patch_size * edge_feat_dim)
-        # src_patches_nodes_neighbor_time_features, Tensor, shape (batch_size, src_num_patches, patch_size * time_feat_dim)
         src_patches_nodes_neighbor_node_raw_features, src_patches_nodes_edge_raw_features, \
-        src_patches_nodes_neighbor_time_features, src_patches_nodes_neighbor_co_occurrence_features = \
+        src_patches_nodes_neighbor_time_features, src_patches_nodes_neighbor_co_occurrence_features, src_extra_patches = \
             self.get_patches(padded_nodes_neighbor_node_raw_features=src_padded_nodes_neighbor_node_raw_features,
                              padded_nodes_edge_raw_features=src_padded_nodes_edge_raw_features,
                              padded_nodes_neighbor_time_features=src_padded_nodes_neighbor_time_features,
                              padded_nodes_neighbor_co_occurrence_features=src_padded_nodes_neighbor_co_occurrence_features,
-                             patch_size=self.patch_size)
+                             patch_size=self.patch_size, extra_padded_features=src_extra_edge_feats)
 
-        # dst_patches_nodes_neighbor_node_raw_features, Tensor, shape (batch_size, dst_num_patches, patch_size * node_feat_dim)
-        # dst_patches_nodes_edge_raw_features, Tensor, shape (batch_size, dst_num_patches, patch_size * edge_feat_dim)
-        # dst_patches_nodes_neighbor_time_features, Tensor, shape (batch_size, dst_num_patches, patch_size * time_feat_dim)
         dst_patches_nodes_neighbor_node_raw_features, dst_patches_nodes_edge_raw_features, \
-        dst_patches_nodes_neighbor_time_features, dst_patches_nodes_neighbor_co_occurrence_features = \
+        dst_patches_nodes_neighbor_time_features, dst_patches_nodes_neighbor_co_occurrence_features, dst_extra_patches = \
             self.get_patches(padded_nodes_neighbor_node_raw_features=dst_padded_nodes_neighbor_node_raw_features,
                              padded_nodes_edge_raw_features=dst_padded_nodes_edge_raw_features,
                              padded_nodes_neighbor_time_features=dst_padded_nodes_neighbor_time_features,
                              padded_nodes_neighbor_co_occurrence_features=dst_padded_nodes_neighbor_co_occurrence_features,
-                             patch_size=self.patch_size)
+                             patch_size=self.patch_size, extra_padded_features=dst_extra_edge_feats)
 
         # align the patch encoding dimension
         # Tensor, shape (batch_size, src_num_patches, channel_embedding_dim)
@@ -168,6 +187,12 @@ class DyGFormer(nn.Module):
 
         patches_data = [patches_nodes_neighbor_node_raw_features, patches_nodes_edge_raw_features,
                         patches_nodes_neighbor_time_features, patches_nodes_neighbor_co_occurrence_features]
+
+        # extra edge channels: project, cat src+dst, append to patches_data
+        for name in self.extra_edge_channel_names:
+            src_proj = self.projection_layer[name](src_extra_patches[name])
+            dst_proj = self.projection_layer[name](dst_extra_patches[name])
+            patches_data.append(torch.cat([src_proj, dst_proj], dim=1))
         # Tensor, shape (batch_size, src_num_patches + dst_num_patches, num_channels, channel_embedding_dim)
         patches_data = torch.stack(patches_data, dim=2)
         # Tensor, shape (batch_size, src_num_patches + dst_num_patches, num_channels * channel_embedding_dim)
@@ -190,6 +215,19 @@ class DyGFormer(nn.Module):
         src_node_embeddings = self.output_layer(src_patches_data)
         # Tensor, shape (batch_size, node_feat_dim)
         dst_node_embeddings = self.output_layer(dst_patches_data)
+
+        # Fuse node-level sidecar features (e.g. personality) if available
+        if self.sidecar_fusion is not None:
+            src_id_tensor = torch.from_numpy(src_node_ids)
+            dst_id_tensor = torch.from_numpy(dst_node_ids)
+            src_sidecar_parts = [self._node_sidecar_features[n][src_id_tensor]
+                                 for n in self._node_sidecar_names]
+            dst_sidecar_parts = [self._node_sidecar_features[n][dst_id_tensor]
+                                 for n in self._node_sidecar_names]
+            src_sidecar = torch.cat(src_sidecar_parts, dim=-1)
+            dst_sidecar = torch.cat(dst_sidecar_parts, dim=-1)
+            src_node_embeddings = self.sidecar_fusion(src_node_embeddings, src_sidecar)
+            dst_node_embeddings = self.sidecar_fusion(dst_node_embeddings, dst_sidecar)
 
         return src_node_embeddings, dst_node_embeddings
 
@@ -244,10 +282,54 @@ class DyGFormer(nn.Module):
         # three ndarrays with shape (batch_size, max_seq_length)
         return padded_nodes_neighbor_ids, padded_nodes_edge_ids, padded_nodes_neighbor_times
 
+    def get_padded_neighbors(self, node_ids: np.ndarray, node_interact_times: np.ndarray):
+        """
+        Retrieve first-hop neighbors and produce padded sequences in a single pass,
+        combining get_all_first_hop_neighbors + pad_sequences to eliminate intermediate allocations.
+        :param node_ids: ndarray, shape (batch_size, )
+        :param node_interact_times: ndarray, shape (batch_size, )
+        :return: three ndarrays with shape (batch_size, max_seq_length)
+        """
+        batch_size = len(node_ids)
+        max_neighbors = self.max_input_sequence_length - 1
+        sampler = self.neighbor_sampler
+
+        max_alloc = self.max_input_sequence_length
+        if max_alloc % self.patch_size != 0:
+            max_alloc += (self.patch_size - max_alloc % self.patch_size)
+
+        padded_ids = np.zeros((batch_size, max_alloc), dtype=np.longlong)
+        padded_eids = np.zeros((batch_size, max_alloc), dtype=np.longlong)
+        padded_times = np.zeros((batch_size, max_alloc), dtype=np.float32)
+
+        padded_ids[:, 0] = node_ids
+        padded_times[:, 0] = node_interact_times
+
+        actual_max_len = 1
+        for idx in range(batch_size):
+            nid = node_ids[idx]
+            i = np.searchsorted(sampler.nodes_neighbor_times[nid], node_interact_times[idx])
+            if i > 0:
+                start = max(0, i - max_neighbors)
+                n = i - start
+                padded_ids[idx, 1:n + 1] = sampler.nodes_neighbor_ids[nid][start:i]
+                padded_eids[idx, 1:n + 1] = sampler.nodes_edge_ids[nid][start:i]
+                padded_times[idx, 1:n + 1] = sampler.nodes_neighbor_times[nid][start:i]
+                seq_len = n + 1
+                if seq_len > actual_max_len:
+                    actual_max_len = seq_len
+
+        if actual_max_len % self.patch_size != 0:
+            actual_max_len += (self.patch_size - actual_max_len % self.patch_size)
+
+        if actual_max_len < max_alloc:
+            return padded_ids[:, :actual_max_len].copy(), padded_eids[:, :actual_max_len].copy(), padded_times[:, :actual_max_len].copy()
+        return padded_ids, padded_eids, padded_times
+
     def get_features(self, node_interact_times: np.ndarray, padded_nodes_neighbor_ids: np.ndarray, padded_nodes_edge_ids: np.ndarray,
                      padded_nodes_neighbor_times: np.ndarray, time_encoder: TimeEncoder):
         """
-        get node, edge and time features
+        get node, edge, time, and extra edge channel features
         :param node_interact_times: ndarray, shape (batch_size, )
         :param padded_nodes_neighbor_ids: ndarray, shape (batch_size, max_seq_length)
         :param padded_nodes_edge_ids: ndarray, shape (batch_size, max_seq_length)
@@ -265,10 +347,17 @@ class DyGFormer(nn.Module):
         # ndarray, set the time features to all zeros for the padded timestamp
         padded_nodes_neighbor_time_features[torch.from_numpy(padded_nodes_neighbor_ids == 0)] = 0.0
 
-        return padded_nodes_neighbor_node_raw_features, padded_nodes_edge_raw_features, padded_nodes_neighbor_time_features
+        # Extra edge channel features (e.g. style, topic), same indexing as edge features
+        edge_id_tensor = torch.from_numpy(padded_nodes_edge_ids)
+        extra_edge_channel_feats = {}
+        for name, feat_tensor in self._extra_edge_features.items():
+            extra_edge_channel_feats[name] = feat_tensor[edge_id_tensor]
+
+        return padded_nodes_neighbor_node_raw_features, padded_nodes_edge_raw_features, padded_nodes_neighbor_time_features, extra_edge_channel_feats
 
     def get_patches(self, padded_nodes_neighbor_node_raw_features: torch.Tensor, padded_nodes_edge_raw_features: torch.Tensor,
-                    padded_nodes_neighbor_time_features: torch.Tensor, padded_nodes_neighbor_co_occurrence_features: torch.Tensor = None, patch_size: int = 1):
+                    padded_nodes_neighbor_time_features: torch.Tensor, padded_nodes_neighbor_co_occurrence_features: torch.Tensor = None,
+                    patch_size: int = 1, extra_padded_features: dict = None):
         """
         get the sequence of patches for nodes
         :param padded_nodes_neighbor_node_raw_features: Tensor, shape (batch_size, max_seq_length, node_feat_dim)
@@ -276,6 +365,7 @@ class DyGFormer(nn.Module):
         :param padded_nodes_neighbor_time_features: Tensor, shape (batch_size, max_seq_length, time_feat_dim)
         :param padded_nodes_neighbor_co_occurrence_features: Tensor, shape (batch_size, max_seq_length, neighbor_co_occurrence_feat_dim)
         :param patch_size: int, patch size
+        :param extra_padded_features: dict {name: Tensor} of shape (batch_size, max_seq_length, feat_dim)
         :return:
         """
         assert padded_nodes_neighbor_node_raw_features.shape[1] % patch_size == 0
@@ -285,6 +375,8 @@ class DyGFormer(nn.Module):
         patches_nodes_neighbor_node_raw_features, patches_nodes_edge_raw_features, \
         patches_nodes_neighbor_time_features, patches_nodes_neighbor_co_occurrence_features = [], [], [], []
 
+        extra_patches_lists = {name: [] for name in (extra_padded_features or {})}
+
         for patch_id in range(num_patches):
             start_idx = patch_id * patch_size
             end_idx = patch_id * patch_size + patch_size
@@ -292,6 +384,8 @@ class DyGFormer(nn.Module):
             patches_nodes_edge_raw_features.append(padded_nodes_edge_raw_features[:, start_idx: end_idx, :])
             patches_nodes_neighbor_time_features.append(padded_nodes_neighbor_time_features[:, start_idx: end_idx, :])
             patches_nodes_neighbor_co_occurrence_features.append(padded_nodes_neighbor_co_occurrence_features[:, start_idx: end_idx, :])
+            for name, feat in (extra_padded_features or {}).items():
+                extra_patches_lists[name].append(feat[:, start_idx: end_idx, :])
 
         batch_size = len(padded_nodes_neighbor_node_raw_features)
         # Tensor, shape (batch_size, num_patches, patch_size * node_feat_dim)
@@ -303,7 +397,14 @@ class DyGFormer(nn.Module):
 
         patches_nodes_neighbor_co_occurrence_features = torch.stack(patches_nodes_neighbor_co_occurrence_features, dim=1).reshape(batch_size, num_patches, patch_size * self.neighbor_co_occurrence_feat_dim)
 
-        return patches_nodes_neighbor_node_raw_features, patches_nodes_edge_raw_features, patches_nodes_neighbor_time_features, patches_nodes_neighbor_co_occurrence_features
+        extra_patches = {}
+        for name, patches_list in extra_patches_lists.items():
+            feat_dim = (extra_padded_features[name]).shape[2]
+            extra_patches[name] = torch.stack(patches_list, dim=1).reshape(
+                batch_size, num_patches, patch_size * feat_dim)
+
+        return patches_nodes_neighbor_node_raw_features, patches_nodes_edge_raw_features, \
+               patches_nodes_neighbor_time_features, patches_nodes_neighbor_co_occurrence_features, extra_patches
 
     def set_neighbor_sampler(self, neighbor_sampler: NeighborSampler):
         """
@@ -337,58 +438,47 @@ class NeighborCooccurrenceEncoder(nn.Module):
     def count_nodes_appearances(self, src_padded_nodes_neighbor_ids: np.ndarray, dst_padded_nodes_neighbor_ids: np.ndarray):
         """
         count the appearances of nodes in the sequences of source and destination nodes
+        Vectorized GPU implementation: replaces per-sample Python loop with batch scatter_add.
         :param src_padded_nodes_neighbor_ids: ndarray, shape (batch_size, src_max_seq_length)
         :param dst_padded_nodes_neighbor_ids:: ndarray, shape (batch_size, dst_max_seq_length)
         :return:
         """
-        # two lists to store the appearances of source and destination nodes
-        src_padded_nodes_appearances, dst_padded_nodes_appearances = [], []
-        # src_padded_node_neighbor_ids, ndarray, shape (src_max_seq_length, )
-        # dst_padded_node_neighbor_ids, ndarray, shape (dst_max_seq_length, )
-        for src_padded_node_neighbor_ids, dst_padded_node_neighbor_ids in zip(src_padded_nodes_neighbor_ids, dst_padded_nodes_neighbor_ids):
+        batch_size = src_padded_nodes_neighbor_ids.shape[0]
+        src_len = src_padded_nodes_neighbor_ids.shape[1]
+        dst_len = dst_padded_nodes_neighbor_ids.shape[1]
 
-            # src_unique_keys, ndarray, shape (num_src_unique_keys, )
-            # src_inverse_indices, ndarray, shape (src_max_seq_length, )
-            # src_counts, ndarray, shape (num_src_unique_keys, )
-            # we can use src_unique_keys[src_inverse_indices] to reconstruct the original input, and use src_counts[src_inverse_indices] to get counts of the original input
-            src_unique_keys, src_inverse_indices, src_counts = np.unique(src_padded_node_neighbor_ids, return_inverse=True, return_counts=True)
-            # Tensor, shape (src_max_seq_length, )
-            src_padded_node_neighbor_counts_in_src = torch.from_numpy(src_counts[src_inverse_indices]).float().to(self.device)
-            # dictionary, store the mapping relation from unique neighbor id to its appearances for the source node
-            src_mapping_dict = dict(zip(src_unique_keys, src_counts))
+        src_ids = torch.from_numpy(src_padded_nodes_neighbor_ids).long().to(self.device)
+        dst_ids = torch.from_numpy(dst_padded_nodes_neighbor_ids).long().to(self.device)
 
-            # dst_unique_keys, ndarray, shape (num_dst_unique_keys, )
-            # dst_inverse_indices, ndarray, shape (dst_max_seq_length, )
-            # dst_counts, ndarray, shape (num_dst_unique_keys, )
-            # we can use dst_unique_keys[dst_inverse_indices] to reconstruct the original input, and use dst_counts[dst_inverse_indices] to get counts of the original input
-            dst_unique_keys, dst_inverse_indices, dst_counts = np.unique(dst_padded_node_neighbor_ids, return_inverse=True, return_counts=True)
-            # Tensor, shape (dst_max_seq_length, )
-            dst_padded_node_neighbor_counts_in_dst = torch.from_numpy(dst_counts[dst_inverse_indices]).float().to(self.device)
-            # dictionary, store the mapping relation from unique neighbor id to its appearances for the destination node
-            dst_mapping_dict = dict(zip(dst_unique_keys, dst_counts))
+        # offset node IDs per batch sample to create unique histogram bins
+        max_id = max(src_ids.max().item(), dst_ids.max().item()) + 1
+        batch_offset = torch.arange(batch_size, device=self.device).unsqueeze(1) * max_id
 
-            # we need to use copy() to avoid the modification of src_padded_node_neighbor_ids
-            # Tensor, shape (src_max_seq_length, )
-            src_padded_node_neighbor_counts_in_dst = torch.from_numpy(src_padded_node_neighbor_ids.copy()).apply_(lambda neighbor_id: dst_mapping_dict.get(neighbor_id, 0.0)).float().to(self.device)
-            # Tensor, shape (src_max_seq_length, 2)
-            src_padded_nodes_appearances.append(torch.stack([src_padded_node_neighbor_counts_in_src, src_padded_node_neighbor_counts_in_dst], dim=1))
+        src_keys = (src_ids + batch_offset).reshape(-1)
+        dst_keys = (dst_ids + batch_offset).reshape(-1)
+        total_bins = batch_size * max_id
 
-            # we need to use copy() to avoid the modification of dst_padded_node_neighbor_ids
-            # Tensor, shape (dst_max_seq_length, )
-            dst_padded_node_neighbor_counts_in_src = torch.from_numpy(dst_padded_node_neighbor_ids.copy()).apply_(lambda neighbor_id: src_mapping_dict.get(neighbor_id, 0.0)).float().to(self.device)
-            # Tensor, shape (dst_max_seq_length, 2)
-            dst_padded_nodes_appearances.append(torch.stack([dst_padded_node_neighbor_counts_in_src, dst_padded_node_neighbor_counts_in_dst], dim=1))
+        # build per-sample histograms via scatter_add
+        src_hist = torch.zeros(total_bins, dtype=torch.float32, device=self.device)
+        src_hist.scatter_add_(0, src_keys, torch.ones(batch_size * src_len, dtype=torch.float32, device=self.device))
+
+        dst_hist = torch.zeros(total_bins, dtype=torch.float32, device=self.device)
+        dst_hist.scatter_add_(0, dst_keys, torch.ones(batch_size * dst_len, dtype=torch.float32, device=self.device))
+
+        # gather per-position counts
+        src_in_src = src_hist[src_keys].reshape(batch_size, src_len)
+        src_in_dst = dst_hist[src_keys].reshape(batch_size, src_len)
+        dst_in_src = src_hist[dst_keys].reshape(batch_size, dst_len)
+        dst_in_dst = dst_hist[dst_keys].reshape(batch_size, dst_len)
 
         # Tensor, shape (batch_size, src_max_seq_length, 2)
-        src_padded_nodes_appearances = torch.stack(src_padded_nodes_appearances, dim=0)
+        src_padded_nodes_appearances = torch.stack([src_in_src, src_in_dst], dim=2)
         # Tensor, shape (batch_size, dst_max_seq_length, 2)
-        dst_padded_nodes_appearances = torch.stack(dst_padded_nodes_appearances, dim=0)
+        dst_padded_nodes_appearances = torch.stack([dst_in_src, dst_in_dst], dim=2)
 
-        # set the appearances of the padded node (with zero index) to zeros
-        # Tensor, shape (batch_size, src_max_seq_length, 2)
-        src_padded_nodes_appearances[torch.from_numpy(src_padded_nodes_neighbor_ids == 0)] = 0.0
-        # Tensor, shape (batch_size, dst_max_seq_length, 2)
-        dst_padded_nodes_appearances[torch.from_numpy(dst_padded_nodes_neighbor_ids == 0)] = 0.0
+        # zero out padding positions (node_id == 0)
+        src_padded_nodes_appearances[src_ids == 0] = 0.0
+        dst_padded_nodes_appearances[dst_ids == 0] = 0.0
 
         return src_padded_nodes_appearances, dst_padded_nodes_appearances
 

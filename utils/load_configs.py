@@ -3,6 +3,76 @@ import sys
 import torch
 
 
+def add_feature_extension_args(parser: argparse.ArgumentParser):
+    """
+    Add CLI arguments for the multi-feature extension (Style / Personality / Topic / Social).
+    Shared by both link prediction and node classification argument parsers.
+    All flags default to off / empty so that the original baseline is unaffected.
+    """
+    group = parser.add_argument_group('Feature Extension')
+    group.add_argument('--use_style', action='store_true', default=False, help='enable Style feature channel')
+    group.add_argument('--use_personality', action='store_true', default=False, help='enable Personality feature channel')
+    group.add_argument('--use_topic', action='store_true', default=False, help='enable Topic feature channel')
+    group.add_argument('--use_social', action='store_true', default=False, help='enable Social sidecar encoder')
+    group.add_argument('--fusion_mode', type=str, default='concat', choices=['concat', 'gate', 'attention'],
+                        help='how to fuse sidecar embeddings with backbone embeddings')
+    group.add_argument('--social_mode', type=str, default='time_aware', choices=['static', 'time_aware'],
+                        help='static: pre-computed once; time_aware: computed per interaction timestamp')
+    group.add_argument('--feature_bank_dir', type=str, default='./processed_data',
+                        help='root directory for pre-computed feature .npy files')
+    group.add_argument('--feature_version', type=str, default='v1',
+                        help='version tag for feature files, allows switching between feature variants')
+    group.add_argument('--freeze_backbone', action='store_true', default=False,
+                        help='freeze DyGFormer backbone parameters (train only fusion / sidecar layers)')
+    group.add_argument('--proxy_feature_mode', type=str, default='data_driven',
+                        choices=['data_driven', 'literature_mapping'],
+                        help='how to construct proxy features: data_driven (PCA/clustering) or literature_mapping (LIWC-to-Big5 etc.)')
+    return parser
+
+
+def get_enabled_features(args: argparse.Namespace):
+    """Return a list of enabled feature names based on the parsed args."""
+    features = []
+    if getattr(args, 'use_style', False):
+        features.append('style')
+    if getattr(args, 'use_personality', False):
+        features.append('personality')
+    if getattr(args, 'use_topic', False):
+        features.append('topic')
+    if getattr(args, 'use_social', False):
+        features.append('social')
+    return features
+
+
+# Stable abbreviations for file naming (order-preserving, deterministic)
+_FEATURE_ABBREV = {
+    'style': 'S',
+    'personality': 'P',
+    'topic': 'T',
+    'social': 'So',
+}
+
+
+def get_feature_tag(args: argparse.Namespace) -> str:
+    """
+    Generate a short, deterministic tag for the current feature combination.
+    Used in checkpoint / log / result file paths to avoid overwriting.
+
+    Examples:
+        []                                     -> 'base'
+        ['style']                              -> 'S'
+        ['style', 'personality']               -> 'S_P'
+        ['style', 'personality', 'topic', 'social'] -> 'full'
+    """
+    enabled = getattr(args, 'enabled_features', [])
+    if not enabled:
+        return 'base'
+    all_four = {'style', 'personality', 'topic', 'social'}
+    if set(enabled) == all_four:
+        return 'full'
+    return '_'.join(_FEATURE_ABBREV.get(f, f) for f in enabled)
+
+
 def get_link_prediction_args(is_evaluation: bool = False):
     """
     get the args for the link prediction task
@@ -12,7 +82,7 @@ def get_link_prediction_args(is_evaluation: bool = False):
     # arguments
     parser = argparse.ArgumentParser('Interface for the link prediction task')
     parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia',
-                        choices=['wikipedia', 'reddit', 'mooc', 'lastfm', 'myket', 'enron', 'SocialEvo', 'uci', 'Flights', 'CanParl', 'USLegis', 'UNtrade', 'UNvote', 'Contacts'])
+                        choices=['wikipedia', 'reddit', 'mooc', 'lastfm', 'myket', 'enron', 'SocialEvo', 'uci', 'Flights', 'CanParl', 'USLegis', 'UNtrade', 'UNvote', 'Contacts', 'temfin'])
     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model, note that EdgeBank is only applicable for evaluation',
                         choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'EdgeBank', 'TCL', 'GraphMixer', 'DyGFormer'])
@@ -49,6 +119,7 @@ def get_link_prediction_args(is_evaluation: bool = False):
     parser.add_argument('--negative_sample_strategy', type=str, default='random', choices=['random', 'historical', 'inductive'],
                         help='strategy for the negative edge sampling')
     parser.add_argument('--load_best_configs', action='store_true', default=False, help='whether to load the best configurations')
+    add_feature_extension_args(parser)
 
     try:
         args = parser.parse_args()
@@ -62,6 +133,9 @@ def get_link_prediction_args(is_evaluation: bool = False):
 
     if args.load_best_configs:
         load_link_prediction_best_configs(args=args)
+
+    args.enabled_features = get_enabled_features(args)
+    args.feature_tag = get_feature_tag(args)
 
     return args
 
@@ -243,7 +317,7 @@ def get_node_classification_args():
     """
     # arguments
     parser = argparse.ArgumentParser('Interface for the node classification task')
-    parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia', choices=['wikipedia', 'reddit'])
+    parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia', choices=["wikipedia", "reddit", "mooc", "temfin"])
     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model',
                         choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'TCL', 'GraphMixer', 'DyGFormer'])
@@ -274,6 +348,7 @@ def get_node_classification_args():
     parser.add_argument('--num_runs', type=int, default=5, help='number of runs')
     parser.add_argument('--test_interval_epochs', type=int, default=10, help='how many epochs to perform testing once')
     parser.add_argument('--load_best_configs', action='store_true', default=False, help='whether to load the best configurations')
+    add_feature_extension_args(parser)
 
     try:
         args = parser.parse_args()
@@ -282,9 +357,12 @@ def get_node_classification_args():
         parser.print_help()
         sys.exit()
 
-    assert args.dataset_name in ['wikipedia', 'reddit'], f'Wrong value for dataset_name {args.dataset_name}!'
+    assert args.dataset_name in ['wikipedia', 'reddit', 'mooc', 'temfin'], f'Wrong value for dataset_name {args.dataset_name}!'
     if args.load_best_configs:
         load_node_classification_best_configs(args=args)
+
+    args.enabled_features = get_enabled_features(args)
+    args.feature_tag = get_feature_tag(args)
 
     return args
 

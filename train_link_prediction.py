@@ -24,6 +24,7 @@ from utils.metrics import get_link_prediction_metrics
 from utils.DataLoader import get_idx_data_loader, get_link_prediction_data
 from utils.EarlyStopping import EarlyStopping
 from utils.load_configs import get_link_prediction_args
+from features.feature_assembler import FeatureAssembler
 
 if __name__ == "__main__":
 
@@ -31,6 +32,9 @@ if __name__ == "__main__":
 
     # get arguments
     args = get_link_prediction_args(is_evaluation=False)
+
+    # initialize feature assembler (no-op when no --use_* flags are set)
+    feature_assembler = FeatureAssembler(args)
 
     # get data for training, validation and testing
     node_raw_features, edge_raw_features, full_data, train_data, val_data, test_data, new_node_val_data, new_node_test_data = \
@@ -67,7 +71,7 @@ if __name__ == "__main__":
         set_random_seed(seed=run)
 
         args.seed = run
-        args.save_model_name = f'{args.model_name}_seed{args.seed}'
+        args.save_model_name = f'{args.model_name}_{args.feature_tag}_seed{args.seed}'
 
         # set up logger
         logging.basicConfig(level=logging.INFO)
@@ -92,6 +96,7 @@ if __name__ == "__main__":
         logger.info(f"********** Run {run + 1} starts. **********")
 
         logger.info(f'configuration is {args}')
+        feature_assembler.log_status(logger)
 
         # create model
         if args.model_name == 'TGAT':
@@ -117,10 +122,14 @@ if __name__ == "__main__":
             dynamic_backbone = GraphMixer(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=train_neighbor_sampler,
                                           time_feat_dim=args.time_feat_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, device=args.device)
         elif args.model_name == 'DyGFormer':
+            extra_edge_features = feature_assembler.get_edge_channel_features() or None
+            node_sidecar = feature_assembler.get_node_sidecar_features() or None
             dynamic_backbone = DyGFormer(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=train_neighbor_sampler,
                                          time_feat_dim=args.time_feat_dim, channel_embedding_dim=args.channel_embedding_dim, patch_size=args.patch_size,
                                          num_layers=args.num_layers, num_heads=args.num_heads, dropout=args.dropout,
-                                         max_input_sequence_length=args.max_input_sequence_length, device=args.device)
+                                         max_input_sequence_length=args.max_input_sequence_length, device=args.device,
+                                         extra_edge_channel_features=extra_edge_features,
+                                         node_sidecar_features=node_sidecar, fusion_mode=args.fusion_mode)
         else:
             raise ValueError(f"Wrong value for model_name {args.model_name}!")
         link_predictor = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1],

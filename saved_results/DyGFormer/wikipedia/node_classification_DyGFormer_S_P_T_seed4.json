@@ -1,0 +1,8 @@
+{
+    "validate metrics": {
+        "roc_auc": "0.7965"
+    },
+    "test metrics": {
+        "roc_auc": "0.8880"
+    }
+}

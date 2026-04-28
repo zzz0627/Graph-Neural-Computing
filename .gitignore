@@ -113,3 +113,10 @@ DG_data/*/*
 !DG_data/myket/*
 processed_data/*/*
 !processed_data/myket/*
+
+# local experiment artifacts
+saved_models/
+logs/
+experiment_logs/
+datasets/
+.codex

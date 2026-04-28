@@ -20,6 +20,7 @@ from evaluate_models_utils import evaluate_model_node_classification
 from utils.DataLoader import get_idx_data_loader, get_node_classification_data
 from utils.EarlyStopping import EarlyStopping
 from utils.load_configs import get_node_classification_args
+from features.feature_assembler import FeatureAssembler
 
 if __name__ == "__main__":
 
@@ -27,6 +28,9 @@ if __name__ == "__main__":
 
     # get arguments
     args = get_node_classification_args()
+
+    # initialize feature assembler (no-op when no --use_* flags are set)
+    feature_assembler = FeatureAssembler(args)
 
     # get data for training, validation and testing
     node_raw_features, edge_raw_features, full_data, train_data, val_data, test_data = \
@@ -48,8 +52,8 @@ if __name__ == "__main__":
         set_random_seed(seed=run)
 
         args.seed = run
-        args.load_model_name = f'node_classification_{args.model_name}_seed{args.seed}'
-        args.save_result_name = f'evaluate_node_classification_{args.model_name}_seed{args.seed}'
+        args.load_model_name = f'node_classification_{args.model_name}_{args.feature_tag}_seed{args.seed}'
+        args.save_result_name = f'evaluate_node_classification_{args.model_name}_{args.feature_tag}_seed{args.seed}'
 
         # set up logger
         logging.basicConfig(level=logging.INFO)
@@ -99,10 +103,14 @@ if __name__ == "__main__":
             dynamic_backbone = GraphMixer(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=full_neighbor_sampler,
                                           time_feat_dim=args.time_feat_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, device=args.device)
         elif args.model_name == 'DyGFormer':
+            extra_edge_features = feature_assembler.get_edge_channel_features() or None
+            node_sidecar = feature_assembler.get_node_sidecar_features() or None
             dynamic_backbone = DyGFormer(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=full_neighbor_sampler,
                                          time_feat_dim=args.time_feat_dim, channel_embedding_dim=args.channel_embedding_dim, patch_size=args.patch_size,
                                          num_layers=args.num_layers, num_heads=args.num_heads, dropout=args.dropout,
-                                         max_input_sequence_length=args.max_input_sequence_length, device=args.device)
+                                         max_input_sequence_length=args.max_input_sequence_length, device=args.device,
+                                         extra_edge_channel_features=extra_edge_features,
+                                         node_sidecar_features=node_sidecar, fusion_mode=args.fusion_mode)
         else:
             raise ValueError(f"Wrong value for model_name {args.model_name}!")
         node_classifier = MLPClassifier(input_dim=node_raw_features.shape[1], dropout=args.dropout)
