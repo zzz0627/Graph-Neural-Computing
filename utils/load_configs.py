@@ -30,6 +30,14 @@ def add_feature_extension_args(parser: argparse.ArgumentParser):
     return parser
 
 
+def add_experiment_management_args(parser: argparse.ArgumentParser):
+    """Add artifact-routing options shared by training and evaluation scripts."""
+    group = parser.add_argument_group('Experiment Management')
+    group.add_argument('--experiment_dir', type=str, default='',
+                        help='optional experiment directory that contains saved_models/, saved_results/, and logs/')
+    return parser
+
+
 def get_enabled_features(args: argparse.Namespace):
     """Return a list of enabled feature names based on the parsed args."""
     features = []
@@ -115,11 +123,14 @@ def get_link_prediction_args(is_evaluation: bool = False):
     parser.add_argument('--val_ratio', type=float, default=0.15, help='ratio of validation set')
     parser.add_argument('--test_ratio', type=float, default=0.15, help='ratio of test set')
     parser.add_argument('--num_runs', type=int, default=5, help='number of runs')
+    parser.add_argument('--start_run', type=int, default=0,
+                        help='starting run/seed index, useful for disjoint parallel seed jobs')
     parser.add_argument('--test_interval_epochs', type=int, default=10, help='how many epochs to perform testing once')
     parser.add_argument('--negative_sample_strategy', type=str, default='random', choices=['random', 'historical', 'inductive'],
                         help='strategy for the negative edge sampling')
     parser.add_argument('--load_best_configs', action='store_true', default=False, help='whether to load the best configurations')
     add_feature_extension_args(parser)
+    add_experiment_management_args(parser)
 
     try:
         args = parser.parse_args()
@@ -349,6 +360,7 @@ def get_node_classification_args():
     parser.add_argument('--test_interval_epochs', type=int, default=10, help='how many epochs to perform testing once')
     parser.add_argument('--load_best_configs', action='store_true', default=False, help='whether to load the best configurations')
     add_feature_extension_args(parser)
+    add_experiment_management_args(parser)
 
     try:
         args = parser.parse_args()

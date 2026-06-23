@@ -23,6 +23,7 @@ from evaluate_models_utils import evaluate_model_link_prediction
 from utils.metrics import get_link_prediction_metrics
 from utils.DataLoader import get_idx_data_loader, get_link_prediction_data
 from utils.EarlyStopping import EarlyStopping
+from utils.experiment_paths import build_result_metadata, get_log_folder, get_model_folder, get_result_folder
 from utils.load_configs import get_link_prediction_args
 from features.feature_assembler import FeatureAssembler
 
@@ -66,7 +67,7 @@ if __name__ == "__main__":
 
     val_metric_all_runs, new_node_val_metric_all_runs, test_metric_all_runs, new_node_test_metric_all_runs = [], [], [], []
 
-    for run in range(args.num_runs):
+    for run in range(args.start_run, args.start_run + args.num_runs):
 
         set_random_seed(seed=run)
 
@@ -77,9 +78,10 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
-        os.makedirs(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_model_name}/", exist_ok=True)
+        log_folder = get_log_folder(args, args.save_model_name)
+        os.makedirs(log_folder, exist_ok=True)
         # create file handler that logs debug and higher level messages
-        fh = logging.FileHandler(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_model_name}/{str(time.time())}.log")
+        fh = logging.FileHandler(os.path.join(log_folder, f'{str(time.time())}.log'))
         fh.setLevel(logging.DEBUG)
         # create console handler with a higher log level
         ch = logging.StreamHandler()
@@ -136,6 +138,12 @@ if __name__ == "__main__":
                                     hidden_dim=node_raw_features.shape[1], output_dim=1)
         model = nn.Sequential(dynamic_backbone, link_predictor)
         logger.info(f'model -> {model}')
+        if args.model_name == 'DyGFormer':
+            extra_edge_dims = {name: dynamic_backbone._extra_edge_features[name].shape[1]
+                               for name in dynamic_backbone.extra_edge_channel_names}
+            logger.info(f'DyGFormer channel summary: extra_edge_channels={dynamic_backbone.extra_edge_channel_names}, '
+                        f'num_channels={dynamic_backbone.num_channels}, '
+                        f'extra_edge_dims={extra_edge_dims}')
         logger.info(f'model name: {args.model_name}, #parameters: {get_parameter_sizes(model) * 4} B, '
                     f'{get_parameter_sizes(model) * 4 / 1024} KB, {get_parameter_sizes(model) * 4 / 1024 / 1024} MB.')
 
@@ -143,7 +151,7 @@ if __name__ == "__main__":
 
         model = convert_to_gpu(model, device=args.device)
 
-        save_model_folder = f"./saved_models/{args.model_name}/{args.dataset_name}/{args.save_model_name}/"
+        save_model_folder = get_model_folder(args, args.save_model_name)
         shutil.rmtree(save_model_folder, ignore_errors=True)
         os.makedirs(save_model_folder, exist_ok=True)
 
@@ -474,9 +482,10 @@ if __name__ == "__main__":
                 "test metrics": {metric_name: f'{test_metric_dict[metric_name]:.4f}' for metric_name in test_metric_dict},
                 "new node test metrics": {metric_name: f'{new_node_test_metric_dict[metric_name]:.4f}' for metric_name in new_node_test_metric_dict}
             }
+        result_json["metadata"] = build_result_metadata(args)
         result_json = json.dumps(result_json, indent=4)
 
-        save_result_folder = f"./saved_results/{args.model_name}/{args.dataset_name}"
+        save_result_folder = get_result_folder(args)
         os.makedirs(save_result_folder, exist_ok=True)
         save_result_path = os.path.join(save_result_folder, f"{args.save_model_name}.json")
 

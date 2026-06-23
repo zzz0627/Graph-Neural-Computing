@@ -2,8 +2,8 @@
 FeatureBank: unified cache for pre-computed features.
 
 Supports two granularities:
-  - node-level  (e.g. personality, social)   shape [num_nodes+1, feat_dim]
-  - edge-level  (e.g. style, topic)          shape [num_edges+1, feat_dim]
+  - node-level  (e.g. personality)           shape [num_nodes+1, feat_dim]
+  - edge-level  (e.g. style, topic, social)  shape [num_edges+1, feat_dim]
 
 Files are loaded lazily from:
   {root_dir}/{dataset_name}/{feature_type}_{version}.npy

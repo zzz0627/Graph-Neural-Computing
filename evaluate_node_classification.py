@@ -19,6 +19,7 @@ from utils.utils import get_neighbor_sampler
 from evaluate_models_utils import evaluate_model_node_classification
 from utils.DataLoader import get_idx_data_loader, get_node_classification_data
 from utils.EarlyStopping import EarlyStopping
+from utils.experiment_paths import build_result_metadata, get_log_folder, get_model_folder, get_result_folder
 from utils.load_configs import get_node_classification_args
 from features.feature_assembler import FeatureAssembler
 
@@ -59,9 +60,10 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
-        os.makedirs(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_result_name}/", exist_ok=True)
+        log_folder = get_log_folder(args, args.save_result_name)
+        os.makedirs(log_folder, exist_ok=True)
         # create file handler that logs debug and higher level messages
-        fh = logging.FileHandler(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_result_name}/{str(time.time())}.log")
+        fh = logging.FileHandler(os.path.join(log_folder, f'{str(time.time())}.log'))
         fh.setLevel(logging.DEBUG)
         # create console handler with a higher log level
         ch = logging.StreamHandler()
@@ -120,7 +122,7 @@ if __name__ == "__main__":
                     f'{get_parameter_sizes(model) * 4 / 1024} KB, {get_parameter_sizes(model) * 4 / 1024 / 1024} MB.')
 
         # load the saved model
-        load_model_folder = f"./saved_models/{args.model_name}/{args.dataset_name}/{args.load_model_name}"
+        load_model_folder = get_model_folder(args, args.load_model_name)
         early_stopping = EarlyStopping(patience=0, save_model_folder=load_model_folder,
                                        save_model_name=args.load_model_name, logger=logger, model_name=args.model_name)
         early_stopping.load_checkpoint(model, map_location='cpu')
@@ -197,9 +199,10 @@ if __name__ == "__main__":
             result_json = {
                 "test metrics": {metric_name: f'{test_metric_dict[metric_name]:.4f}' for metric_name in test_metric_dict}
             }
+        result_json["metadata"] = build_result_metadata(args)
         result_json = json.dumps(result_json, indent=4)
 
-        save_result_folder = f"./saved_results/{args.model_name}/{args.dataset_name}"
+        save_result_folder = get_result_folder(args)
         os.makedirs(save_result_folder, exist_ok=True)
         save_result_path = os.path.join(save_result_folder, f"{args.save_result_name}.json")
         with open(save_result_path, 'w') as file:

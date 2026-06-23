@@ -11,6 +11,7 @@ import json
 
 from models.EdgeBank import edge_bank_link_prediction
 from utils.metrics import get_link_prediction_metrics, get_node_classification_metrics
+from utils.experiment_paths import build_result_metadata, get_log_folder, get_result_folder
 from utils.utils import set_random_seed
 from utils.utils import NegativeEdgeSampler, NeighborSampler
 from utils.DataLoader import Data
@@ -274,9 +275,10 @@ def evaluate_edge_bank_link_prediction(args: argparse.Namespace, train_data: Dat
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
-        os.makedirs(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_result_name}/", exist_ok=True)
+        log_folder = get_log_folder(args, args.save_result_name)
+        os.makedirs(log_folder, exist_ok=True)
         # create file handler that logs debug and higher level messages
-        fh = logging.FileHandler(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_result_name}/{str(time.time())}.log")
+        fh = logging.FileHandler(os.path.join(log_folder, f'{str(time.time())}.log'))
         fh.setLevel(logging.DEBUG)
         # create console handler with a higher log level
         ch = logging.StreamHandler()
@@ -374,9 +376,10 @@ def evaluate_edge_bank_link_prediction(args: argparse.Namespace, train_data: Dat
         result_json = {
             "test metrics": {metric_name: f'{test_metric_dict[metric_name]:.4f}'for metric_name in test_metric_dict}
         }
+        result_json["metadata"] = build_result_metadata(args)
         result_json = json.dumps(result_json, indent=4)
 
-        save_result_folder = f"./saved_results/{args.model_name}/{args.dataset_name}"
+        save_result_folder = get_result_folder(args)
         os.makedirs(save_result_folder, exist_ok=True)
         save_result_path = os.path.join(save_result_folder, f"{args.save_result_name}.json")
         with open(save_result_path, 'w') as file:
