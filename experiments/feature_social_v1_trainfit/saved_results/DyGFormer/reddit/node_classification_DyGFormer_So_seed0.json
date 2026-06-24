@@ -1,0 +1,18 @@
+{
+    "validate metrics": {
+        "roc_auc": "0.7268"
+    },
+    "test metrics": {
+        "roc_auc": "0.7271"
+    },
+    "metadata": {
+        "experiment_dir": "experiments/feature_social_v1_trainfit",
+        "feature_bank_dir": "experiments/feature_social_v1_trainfit/feature_bank",
+        "feature_version": "v1_trainfit",
+        "preprocessing_protocol": "trainfit",
+        "enabled_features": [
+            "social"
+        ],
+        "feature_tag": "So"
+    }
+}

@@ -1,0 +1,28 @@
+{
+    "validate metrics": {
+        "average_precision": "0.9931",
+        "roc_auc": "0.9926"
+    },
+    "new node validate metrics": {
+        "average_precision": "0.9894",
+        "roc_auc": "0.9892"
+    },
+    "test metrics": {
+        "average_precision": "0.9915",
+        "roc_auc": "0.9909"
+    },
+    "new node test metrics": {
+        "average_precision": "0.9871",
+        "roc_auc": "0.9860"
+    },
+    "metadata": {
+        "experiment_dir": "experiments/feature_social_v2_trainfit",
+        "feature_bank_dir": "experiments/feature_social_v2_trainfit/feature_bank",
+        "feature_version": "v2_trainfit",
+        "preprocessing_protocol": "trainfit",
+        "enabled_features": [
+            "social"
+        ],
+        "feature_tag": "So"
+    }
+}

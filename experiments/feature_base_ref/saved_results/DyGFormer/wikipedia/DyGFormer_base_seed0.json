@@ -1,0 +1,26 @@
+{
+    "validate metrics": {
+        "average_precision": "0.9926",
+        "roc_auc": "0.9918"
+    },
+    "new node validate metrics": {
+        "average_precision": "0.9886",
+        "roc_auc": "0.9881"
+    },
+    "test metrics": {
+        "average_precision": "0.9904",
+        "roc_auc": "0.9894"
+    },
+    "new node test metrics": {
+        "average_precision": "0.9859",
+        "roc_auc": "0.9841"
+    },
+    "metadata": {
+        "experiment_dir": "experiments/feature_base_ref",
+        "feature_bank_dir": "./processed_data",
+        "feature_version": "v1",
+        "preprocessing_protocol": "base",
+        "enabled_features": [],
+        "feature_tag": "base"
+    }
+}

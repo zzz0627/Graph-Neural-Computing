@@ -1,0 +1,16 @@
+{
+    "validate metrics": {
+        "roc_auc": "0.6877"
+    },
+    "test metrics": {
+        "roc_auc": "0.6747"
+    },
+    "metadata": {
+        "experiment_dir": "experiments/feature_base_ref",
+        "feature_bank_dir": "./processed_data",
+        "feature_version": "v1",
+        "preprocessing_protocol": "base",
+        "enabled_features": [],
+        "feature_tag": "base"
+    }
+}

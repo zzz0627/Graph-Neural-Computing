@@ -1,0 +1,48 @@
+{
+    "dataset_name": "reddit",
+    "feature_version": "v1_trainfit",
+    "preprocessing_protocol": "trainfit",
+    "feature_path": "experiments/feature_social_v1_trainfit/feature_bank/reddit/social_v1_trainfit.npy",
+    "processed_dir": "./processed_data",
+    "train_edge_count": 389989,
+    "train_time_span": 1882469.26480001,
+    "normalization": {
+        "scope": "lp_train_edges",
+        "mean": [
+            3.363353729248047,
+            1.4886205196380615,
+            8.11574649810791,
+            0.00029796408489346504,
+            0.7525011301040649,
+            7.113626956939697,
+            5.222009658813477,
+            5.553846836090088,
+            0.006344547960907221,
+            0.7880703806877136
+        ],
+        "std": [
+            1.4058468341827393,
+            0.9351052641868591,
+            2.7937448024749756,
+            0.005367862526327372,
+            0.2726787030696869,
+            2.2220630645751953,
+            1.588112473487854,
+            2.3580265045166016,
+            0.007736870553344488,
+            0.18731528520584106
+        ]
+    },
+    "sanity": {
+        "shape": [
+            672448,
+            10
+        ],
+        "expected_dim": 10,
+        "row0_all_zero": true,
+        "finite": true,
+        "train_mean_abs_max": 0.0011976163368672132,
+        "train_std_min": 0.9997777938842773,
+        "train_std_max": 1.000044345855713
+    }
+}

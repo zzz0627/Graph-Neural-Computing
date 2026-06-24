@@ -1,0 +1,48 @@
+{
+    "dataset_name": "wikipedia",
+    "feature_version": "v1_trainfit",
+    "preprocessing_protocol": "trainfit",
+    "feature_path": "experiments/feature_social_v1_trainfit/feature_bank/wikipedia/social_v1_trainfit.npy",
+    "processed_dir": "./processed_data",
+    "train_edge_count": 79202,
+    "train_time_span": 1862652.10000001,
+    "normalization": {
+        "scope": "lp_train_edges",
+        "mean": [
+            3.424933910369873,
+            1.1440998315811157,
+            6.039772987365723,
+            0.000926242908462882,
+            0.7794007062911987,
+            3.9849586486816406,
+            1.8984086513519287,
+            6.288201808929443,
+            0.0007600635872222483,
+            0.8158810138702393
+        ],
+        "std": [
+            1.6440749168395996,
+            0.8052312731742859,
+            2.995260000228882,
+            0.004283090587705374,
+            0.3218610882759094,
+            1.148370623588562,
+            1.016789436340332,
+            2.4749934673309326,
+            0.0033109651412814856,
+            0.2032328099012375
+        ]
+    },
+    "sanity": {
+        "shape": [
+            157475,
+            10
+        ],
+        "expected_dim": 10,
+        "row0_all_zero": true,
+        "finite": true,
+        "train_mean_abs_max": 0.0001100537265301682,
+        "train_std_min": 0.9998937249183655,
+        "train_std_max": 1.0000433921813965
+    }
+}
